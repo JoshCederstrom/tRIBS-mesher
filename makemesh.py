@@ -510,19 +510,60 @@ def generate_mesh_from_points(
 # ==============================================================================
 # tRIBS Mesh File Writing Functions
 # ==============================================================================
-def write_diagnostic_shapefile(output_file, vertices_3d, triangles, node_codes, crs=None):
-    print(f"\n--- Writing diagnostic shapefile to {output_file} ---")
+def write_diagnostic_shapefile(output_base, vertices_3d, triangles, node_codes, crs=None):
+    """
+    Writes three diagnostic shapefiles sharing a common base path:
+      {output_base}_triangles.shp  — mesh triangles, coded by dominant node type
+      {output_base}_nodes.shp      — mesh nodes with their boundary codes
+      {output_base}_edges.shp      — mesh edges coded by highest-priority endpoint code
+
+    Code values: 0=Interior, 1=Boundary, 2=Outlet, 3=Stream
+    Edge code priority: 2 > 3 > 1 > 0
+    """
+    print(f"\n--- Writing diagnostic shapefiles to {output_base}_*.shp ---")
+
+    # --- Triangles ---
     polys, tri_codes = [], []
     for tri_indices in triangles:
         polys.append(Polygon(vertices_3d[tri_indices][:, :2]))
         codes_in_tri = node_codes[tri_indices]
-        if 2 in codes_in_tri: tri_codes.append(2)
-        elif 3 in codes_in_tri: tri_codes.append(3)
-        elif 1 in codes_in_tri: tri_codes.append(1)
-        else: tri_codes.append(0)
-    gdf = gpd.GeoDataFrame({'code': tri_codes}, geometry=polys, crs=crs)
-    gdf.to_file(output_file, driver='ESRI Shapefile')
-    print("Diagnostic file written.")
+        if 2 in codes_in_tri:
+            tri_codes.append(2)
+        elif 3 in codes_in_tri:
+            tri_codes.append(3)
+        elif 1 in codes_in_tri:
+            tri_codes.append(1)
+        else:
+            tri_codes.append(0)
+    gpd.GeoDataFrame({'code': tri_codes}, geometry=polys, crs=crs).to_file(
+        f"{output_base}_triangles.shp", driver='ESRI Shapefile'
+    )
+
+    # --- Nodes ---
+    pts = [Point(v[0], v[1]) for v in vertices_3d]
+    gpd.GeoDataFrame({'code': node_codes}, geometry=pts, crs=crs).to_file(
+        f"{output_base}_nodes.shp", driver='ESRI Shapefile'
+    )
+
+    # --- Edges ---
+    _priority = {0: 1, 1: 2, 3: 0, 2: 3}
+    seen = set()
+    lines, edge_codes = [], []
+    for tri in triangles:
+        for k in range(3):
+            i, j = tri[k], tri[(k + 1) % 3]
+            key = (min(i, j), max(i, j))
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(LineString([vertices_3d[i, :2], vertices_3d[j, :2]]))
+            ci, cj = int(node_codes[i]), int(node_codes[j])
+            edge_codes.append(ci if _priority.get(ci, 0) >= _priority.get(cj, 0) else cj)
+    gpd.GeoDataFrame({'code': edge_codes}, geometry=lines, crs=crs).to_file(
+        f"{output_base}_edges.shp", driver='ESRI Shapefile'
+    )
+
+    print(f"  Wrote {len(polys)} triangles, {len(pts)} nodes, {len(lines)} edges.")
 
 def write_tRIBS_mesh_files(output_prefix, output_path, vertices, triangles, node_codes):
     print(f"\n--- Preparing to write tRIBS mesh files ---")
@@ -599,12 +640,12 @@ def write_tRIBS_mesh_files(output_prefix, output_path, vertices, triangles, node
 
 if __name__ == "__main__":
     # --- FILE PATHS ---
-    name = "CloverCanyon"
-    output_path = f'data/model/mesh/'
-    points_file = f'data/model/mesh/{name}.points'
-    stream_shapefile = f'data/preprocessing/{name}_stream.shp'
-    dem_file = "../../GIS/data/raster/USGS_1m_2019.tif"
-    tree_file = "../../GIS/data/shp/Tree_Points/TreePoints_CC.shp" # Set to None to disable
+    name = "SMF"
+    output_path = f'outputs/'
+    points_file = f'/Users/cjceders/repos/tRIBS-Workshop-Sandbox/workspaces/SMF_pytRIBS/smf_init_data/mesh/SMF.points'          # Interior terrain points from pytRIBS wavelet transform
+    stream_shapefile = f'/Users/cjceders/repos/tRIBS-Workshop-Sandbox/workspaces/SMF_pytRIBS/smf_demo/data/preprocessing/SMF_stream.shp'
+    dem_file = "/Users/cjceders/repos/tRIBS-Workshop-Sandbox/workspaces/SMF_pytRIBS/smf_init_data/USGS_10m_clip.tif"
+    tree_file = None  # Set to None to disable
 
     print("--- Generating mesh with DEM, Uniform Streams, and Tree Centroids (v10) ---")
     
@@ -613,7 +654,7 @@ if __name__ == "__main__":
     stream_clear_radius = 10.0       # meters. Removes interior/tree points this close to streams.
                                      # In cases with an extremely dense set of tree points increasing this can help.
     tree_cull_radius = 5.0           # meters. Removes original interior points this close to trees.
-    quality_opts = 'q10a15000'      # Triangle quality options example q10a20000
+    quality_opts = 'q10a15050'      # Triangle quality options example q10a20000
         # q: Min angle in degrees, will add in extra vertices to remove triangles not meeting criteria.
         # a: Max area in units from points, will add extra triangles to make sure no triangle exceeds this area.
         #    Be careful with this, if you set this too low, it can cause the mesh to fail.
@@ -645,7 +686,7 @@ if __name__ == "__main__":
         )
         
         write_diagnostic_shapefile(
-            output_file=f'data/preprocessing/{name}_tin_{quality_opts}.shp',
+            output_base=f'{output_path}/{name}_tin_{quality_opts}',
             vertices_3d=final_vertices,
             triangles=final_triangles,
             node_codes=final_node_codes,
